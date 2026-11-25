@@ -1,0 +1,395 @@
+--- a/svc/hotspot.sh
++++ b/svc/hotspot.sh
+@@ -285,7 +285,11 @@
+ dg_ha_path() { [ "$DG_RUN" = 1 ] && case "$DG_ST" in wait|up|ok) true ;; *) false ;; esac; }
+ write_conf() {
+   _hch=149; _hhm=a; _hht='[HT40+][SHORT-GI-20][SHORT-GI-40]'; _hcc=
+-  if dg_ha_path; then _hch=$DG_HA_CHANNEL; _hhm=$DG_HA_HWMODE; _hht=$DG_HA_HTCAP; _hcc=$DG_HA_COUNTRY; fi
++  if dg_ha_path; then
++    _hch=$DG_HA_CHANNEL; _hhm=$DG_HA_HWMODE; _hht=$DG_HA_HTCAP; _hcc=$DG_HA_COUNTRY
++    # AX900mini 실차 Hotfix 2 설정: 149번 미지원 로그를 확인한 뒤 36번에서 연결 확인.
++    [ "$DG_MOD" != 8851bu ] || { _hch=36; _hhm=a; _hht=; _hcc=KR; }
++  fi
+   $BB cat > $CONF <<CONFEOF
+ interface=$WIF
+ driver=nl80211
+@@ -784,6 +788,21 @@
+   dg_using && { dg_reup_check; [ "$DG_ST" = reupmax ] && return 0; }
+   # 배포판(DG-3, 소유자 결정): 지원 동글로 확인되기 전에는(바꿔 꽂은 동글 포함) 동글 wlan0에 우리 AP를 띄우지 않는다
+   dg_using && ! dg_oui_gate && return 0
++  if [ "$DG_MOD" = 8851bu ]; then
++    if [ "$WIF" != wlan0 ] || ! dg_ax_payload lte.sh ||
++      ! { . "$KP_AX_APP/bin/lte.sh"; kp_ax_no_forward; }; then
++      stop_ours
++      aa_sig 0 stop
++      [ -f "$W/ax-lte.fail" ] || log "AX900mini: IPv4/IPv6 포워딩 차단 확인 실패. AP를 중지했습니다."
++      : > "$W/ax-lte.fail"
++      return 0
++    fi
++    if [ ! -f "$W/ax-lte.ok" ] || [ -f "$W/ax-lte.fail" ]; then
++      log "AX900mini: wlan0 IPv4/IPv6 포워딩 차단 확인"
++      : > "$W/ax-lte.ok"
++      rm -f "$W/ax-lte.fail"
++    fi
++  fi
+   $BB ifconfig $WIF $AP_IP netmask 255.255.255.0 up 2>/dev/null
+   if ! running "hostapd $CONF"; then
+     # 베타 3(B3-3 b_reup): 이 부팅에 우리 hostapd가 한 번 뜬 뒤 다시 띄우는 것만 센다(설정 바뀜·동글 다시 잡힘·죽음 모두 여기로 옴)
+@@ -4138,6 +4157,40 @@
+ # (같은 부팅에 업데이트해도 결과를 잃어 영원히 기다리거나 다음 부팅에 hang으로 막히지 않게, 부팅 id로 지난 부팅 것은 가름)
+ DG_RCF=${DG_RCF:-$BK/dongle.rc}
+ DG_MOD=88x2bu
++# AX development files are owned by the add-on, not the official package.
++KP_AX_APP=${KP_AX_APP:-/data/nemesis/apps/korea.projection.rtl8831bu}
++DG_DRIVER_FILE=$BK/dongle.driver
++DG_DRIVER_LOCKED=
++# The choice is fixed before insmod and survives a service restart in the same boot.
++dg_driver_restore() {
++  DG_MOD=88x2bu; DG_DRIVER_LOCKED=
++  local boot module
++  [ -r "$DG_DRIVER_FILE" ] && read -r boot module < "$DG_DRIVER_FILE" 2>/dev/null || return 0
++  [ "$boot" = "${BID:-$(dg_kv_bid)}" ] && [ "$boot" != none ] || return 0
++  case "$module" in 88x2bu|8851bu) DG_MOD=$module; DG_DRIVER_LOCKED=1 ;; esac
++}
++dg_driver_for_id() {
++  case "$1" in 0bda:b831|0bda:b851) echo 8851bu ;; *) echo 88x2bu ;; esac
++}
++dg_driver_sysfs() {
++  case "$DG_MOD" in
++    8851bu) echo "${USB_SYS%/devices}/drivers/rtl8851bu" ;;
++    *) echo "$DG_88DRV" ;;
++  esac
++}
++dg_driver_save() {
++  [ -n "$BID" ] || return 1
++  [ "$DG_DRIVER_LOCKED" != 1 ] || return 0
++  $BB printf '%s %s\n' "$BID" "$DG_MOD" > "$DG_DRIVER_FILE.tmp" &&
++    $BB mv -f "$DG_DRIVER_FILE.tmp" "$DG_DRIVER_FILE" && $BB sync || return 1
++  DG_DRIVER_LOCKED=1
++}
++dg_insmod() {
++  case "$DG_MOD" in
++    8851bu) "$INSMOD_SYS" "$1" ifname="$DG_IFNAME" if2name=kpp%d rtw_usbfs_block=1 rtw_country_code=KR ;;
++    *) "$INSMOD_SYS" "$1" ifname="$DG_IFNAME" if2name=kpp%d ;;
++  esac
++}
+ DG_MAP='tcc897x:tcc897x tcc803x:tcc803x-a'
+ DG_FW=260902
+ INSMOD_SYS=${INSMOD_SYS:-/system/bin/insmod}
+@@ -4150,6 +4203,8 @@
+   _dgs=$(getprop ro.board.platform 2>/dev/null)
+   DG_G=$(dg_grp "$_dgs")
+   [ -n "$DG_G" ] || { DG_WHY=nosoc; return 1; }
++  [ "$DG_DRIVER_LOCKED" = 1 ] || DG_MOD=$(dg_driver_for_id "$DG_USBID")
++  if [ "$DG_MOD" = 8851bu ] && ! dg_ax_target; then DG_WHY=nosoc; return 1; fi
+   return 0
+ }
+ # 내비가 260902판보다 옛것인가(끝 6자리가 더 작거나 없음). 막지 않고 상태 화면 안내에만 쓴다(리뷰 낮음 7: 더 새 판은 no)
+@@ -4198,7 +4253,7 @@
+ # 우리 id를 그대로 쓴 개조판은 여기서 가를 수 없고 변조 검사(kp_verify)가 막는다.
+ NEMESIS_APPS=${NEMESIS_APPS:-/data/nemesis/apps}
+ DG_OTHER_PKGS='usbwifi.hotspot stock.hotspot'
+-DG_OTHER_MODS='8812au 88XXau 8821au 8821cu 8814au rtl8812au rtl8821cu rtl88x2bu rtl8xxxu r8188eu 8188eu mt7601u'
++DG_OTHER_MODS='8851bu 8812au 88XXau 8821au 8821cu 8814au rtl8812au rtl8821cu rtl88x2bu rtl8xxxu r8188eu 8188eu mt7601u'
+ DG_OTHER_IFS='rtwlan0'
+ DG_OTHERPKG_MSG="다른 동글 패키지가 있어 동글을 쓰지 않습니다. 그 패키지를 지운 뒤 재부팅해 주세요."
+ # 찾으면 DG_OTHER에 이름(패키지 id·드라이버·인터페이스 이름)을 두고 0
+@@ -4264,7 +4319,25 @@
+ dg_hc_get() { case "$DG_HC" in *" $1=y "*) return 0 ;; *" $1=n "*) return 1 ;; esac; return 2; }
+ dg_hc_put() { [ ${#DG_HC} -gt 4000 ] && DG_HC=' '; DG_HC="$DG_HC$1=$2 "; }
+ # 허용 USB 번호인가(vid:pid)
++dg_ax_id() { case "$1" in 0bda:b831|0bda:b851) return 0 ;; esac; return 1; }
++dg_ax_target() {
++  [ "$(getprop ro.board.platform 2>/dev/null)" = tcc803x ] || return 1
++  [ "$(getprop ro.build.version.release 2>/dev/null)" = 4.4.2 ] || return 1
++  [ "$("$BB" uname -r)" = 3.18.24-tcc ] && [ "$("$BB" uname -m)" = armv7l ] || return 1
++  case "$(getprop ro.build.product 2>/dev/null)" in
++    NX4HEV.KOR.0000.V039.001.260902|NX4HEV.KOR.S5W_M.V039.001.260902) return 0 ;;
++  esac
++  return 1
++}
++dg_ax_payload() {
++  [ -r "$KP_AX_APP/bin/payload.sha256" ] || return 1
++  local expected actual
++  expected=$("$BB" awk -v name="$1" '$2 == name { print $1 }' "$KP_AX_APP/bin/payload.sha256")
++  actual=$("$BB" sha256sum < "$KP_AX_APP/bin/$1") || return 1
++  [ -n "$expected" ] && [ "${actual%% *}" = "$expected" ]
++}
+ dg_idok() {
++  dg_ax_id "$1" && { dg_ax_target; return $?; }
+   dg_hc_get "i:$1"; _dgr=$?; [ $_dgr = 2 ] || return $_dgr
+   dg_h "$1"
+   case " $DG_USB_OK " in *" $_dgh "*) [ -n "$_dgh" ] && { dg_hc_put "i:$1" y; return 0; } ;; esac
+@@ -4272,8 +4345,81 @@
+   [ -n "$_dgh" ] && dg_hc_put "i:$1" n
+   return 1
+ }
+-# 결과: DG_USB = ok | notlisted | none
++dg_cdrom_interface() {
++  local intf
++  for intf in "$1"/*:*; do
++    us_rd "$intf/bInterfaceClass"; [ "$_ur" = 08 ] || continue
++    us_rd "$intf/bInterfaceSubClass"; [ "$_ur" = 06 ] || continue
++    us_rd "$intf/bInterfaceProtocol"; [ "$_ur" = 50 ] && return 0
++  done
++  return 1
++}
++# An eject is allowed once per boot and only for a SCSI CD-ROM below 0bda:1a2b.
++# It uses the storage stack, so the AOA guard can leave usbfs protected.
++dg_cdrom_switch() {
++  local dev="$DG_USBDEV" intf sg type major minor node pid elapsed boot phase tool
++  tool=${DG_EJECT:-$KP_AX_APP/bin/kp-eject}
++  dg_ax_payload kp-eject || return 0
++  [ "$DG_USB" = cdrom ] && [ -n "$BID" ] && [ -x "$tool" ] || return 0
++  boot=; phase=
++  if [ -r "$BK/dongle.cdrom" ]; then
++    read -r boot phase < "$BK/dongle.cdrom" 2>/dev/null || :
++  fi
++  [ "$boot" != "$BID" ] || return 0
++  if [ "$phase" = started ]; then
++    log "동글: 이전 CD-ROM 전환 도중 부팅 종료, 동글 사용 토글 후 다시 시도 가능"
++    return 0
++  fi
++  for intf in "$dev"/*:*; do
++    for sg in "$intf"/host*/target*/*/scsi_generic/sg*; do
++      [ -r "$sg/dev" ] || continue
++      read -r type < "$sg/device/type" 2>/dev/null || continue
++      [ "$type" = 5 ] || continue
++      IFS=: read -r major minor < "$sg/dev" || continue
++      [ "$major" = 21 ] || continue
++      case "$minor" in ''|*[!0-9]*) continue ;; esac
++      node=$W/kp-sg.$$
++      $BB mknod "$node" c "$major" "$minor" 2>/dev/null || return 0
++      # Confirm the original sysfs path before sending the one eject request.
++      us_rd "$dev/idVendor"; [ "$_ur" = 0bda ] || { rm -f "$node"; return 0; }
++      us_rd "$dev/idProduct"; [ "$_ur" = 1a2b ] || { rm -f "$node"; return 0; }
++      [ -r "$sg/dev" ] || { rm -f "$node"; return 0; }
++      if ! dg_cdrom_record started; then rm -f "$node"; return 0; fi
++      "$tool" "$node" </dev/null >/dev/null 2>&1 &
++      pid=$!; elapsed=0
++      while kill -0 "$pid" 2>/dev/null && [ "$elapsed" -lt 3 ]; do
++        sleep 1 & wait $!
++        elapsed=$((elapsed + 1))
++      done
++      if kill -0 "$pid" 2>/dev/null; then
++        kill "$pid" 2>/dev/null
++        rm -f "$node"
++        log "동글: CD-ROM eject 호출 시간 초과"
++        return 0
++      fi
++      dg_cdrom_record done || :
++      rm -f "$node"
++      for elapsed in 1 2 3 4 5; do
++        us_rd "$dev/idVendor"
++        if [ "$_ur" = 0bda ]; then
++          us_rd "$dev/idProduct"
++          case "$_ur" in b831|b851) log "동글: CD-ROM 전환 완료(0bda:$_ur)"; return 0 ;; esac
++        fi
++        sleep 1 & wait $!
++      done
++      log "동글: CD-ROM 전환 뒤 같은 포트에서 Wi-Fi ID 미확인"
++      return 0
++    done
++  done
++  log "동글: CD-ROM 모드에서 SCSI generic 장치를 찾지 못함"
++}
++dg_cdrom_record() {
++  $BB printf '%s %s\n' "$BID" "$1" > "$BK/dongle.cdrom.tmp" &&
++    $BB mv -f "$BK/dongle.cdrom.tmp" "$BK/dongle.cdrom" && $BB sync
++}
++# 결과: DG_USB = ok | cdrom | notlisted | none
+ dg_usb() {
++  local cdrom= cdroms=0
+   DG_USB=none; DG_USBDEV=; DG_USBID=
+   for _dgu in $USB_SYS/*; do
+     case "${_dgu##*/}" in usb*|*:*) continue ;; esac
+@@ -4281,7 +4427,16 @@
+     case "$_dgv" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) continue ;; esac
+     # 리뷰 중간 3: 허브(class 09)는 건너뛴다(내비 안쪽 Realtek 허브 등)
+     us_rd $_dgu/bDeviceClass; [ "$_ur" = 09 ] && continue
++    if [ "$_dgv:$_dgp" = 0bda:1a2b ] &&
++       [ "$DG_DRIVER_LOCKED" != 1 ] && dg_ax_target && dg_cdrom_interface "$_dgu"; then
++      cdrom=$_dgu; cdroms=$((cdroms+1))
++      continue
++    fi
+     if dg_idok "$_dgv:$_dgp"; then
++        if [ "$DG_DRIVER_LOCKED" = 1 ] && [ "$(dg_driver_for_id "$_dgv:$_dgp")" != "$DG_MOD" ]; then
++          [ "$DG_USB" = none ] && DG_USB=notlisted
++          continue
++        fi
+         # 동글 판정(DG-3)
+         if ! dg_names_has "$_dgv:$_dgp" || dg_name_ok "$_dgv:$_dgp" "$_dgu"; then DG_USB=ok; DG_USBDEV=$_dgu; DG_USBID=$_dgv:$_dgp; return 0; fi
+         DG_USB=notlisted
+@@ -4289,6 +4444,9 @@
+       case " $DG_WIFI_VENDORS " in *" $_dgv "*) [ $DG_USB = none ] && dg_wifi_like $_dgu && DG_USB=notlisted ;; esac
+     fi
+   done
++  if [ "$DG_USB" = none ] && [ "$cdroms" = 1 ]; then
++    DG_USB=cdrom; DG_USBDEV=$cdrom; DG_USBID=0bda:1a2b
++  fi
+   return 0
+ }
+ # Wi-Fi 동글처럼 보이는가: 제조사 고유(class ff) 인터페이스가 있고 거기에 붙은 드라이버가 없음(카드 리더·USB 랜처럼 드라이버가 붙은 장치는 아님)
+@@ -4619,6 +4777,10 @@
+ # DG_USBDEV·DG_USBID(dg_usb 결과)로 모델 이름(영문 낱말, 공백 없음)
+ # 정식(A2): 모델 표도 해시(vid:pid, vid:pid|제품). 제품 칸이 *이면 그 번호면 그 모델
+ dg_model() {
++  case "$DG_USBID" in
++    0bda:b831) echo AX900mini; return 0 ;;
++    0bda:b851) echo RTL8851BU; return 0 ;;
++  esac
+   dg_h "$DG_USBID"; _dgmi=$_dgh; [ -n "$_dgmi" ] || { echo other; return 0; }
+   us_rd $DG_USBDEV/product; dg_h "$DG_USBID|$_ur"; _dgmp=$_dgh
+   while IFS='|' read -r _dgm1x _dgm2x _dgm3x; do
+@@ -4804,7 +4966,7 @@
+ # 같은 분류를 한다. "Failed to request a scan of neighboring BSSes"는 40MHz 이웃 검색(HT_SCAN)을 드라이버가 거절한 것(늦게 꽂은 부팅 꼴)
+ DG_HAWHY_AWK='{ l = tolower($0) }
+ l ~ /failed to request a scan/ { r = "40MHz 이웃 검색을 드라이버가 거절" }
+-l ~ /not allowed|no-ir|no_ir|no ir|could not set channel|disabled channel|dfs/ { r = "채널 149를 쓸 수 없음(나라 규칙)" }
++l ~ /not allowed|no-ir|no_ir|no ir|could not set channel|disabled channel|dfs/ { r = "AP 채널을 쓸 수 없음(나라 규칙)" }
+ r == "" && l ~ /ht40|secondary channel|ht_capab/ { r = "40MHz 설정을 받지 않음" }
+ r == "" && l ~ /nl80211|driver/ && l ~ /fail|error|could not/ { r = "드라이버가 AP 모드를 받지 않음" }
+ r == "" && l ~ /unable to setup interface|failed to initialize|was not started|wasn.t started/ { r = "인터페이스를 시작하지 못함" }
+@@ -4954,7 +5116,8 @@
+   [ -f $BK/mod.pin ] && return 0
+   _dgwhy=$(dg_evidence)
+   [ -n "$_dgwhy" ] || return 0
+-  dg_usb; [ $DG_USB = ok ] || return 0
++  dg_usb; [ "$DG_USB" = ok ] || return 0
++  dg_ax_id "$DG_USBID" && return 0  # 이 개발 동글은 사용자가 토글을 켜야 함
+   dg_pick || return 0
+   [ -s $DG_DRV/$DG_G/$DG_MOD.ko ] || return 0
+   dg_otherpkg && return 0
+@@ -5114,7 +5277,7 @@
+     { t = ""; if (match($0, /\[ *[0-9]+\.[0-9]+\]/)) { t = substr($0, RSTART + 1, RLENGTH - 2); gsub(/ /, "", t) } }
+     t != "" && (t + 0) < (t0 + 0) { next }
+     /[Ss][Ss][Ii][Dd]|[Pp][Ss][Kk]|[Pp]assphrase|[Pp]assword|command line|serialno|androidboot|VID[=:\/ ]|[^ ]PID[=:]|[Vv]endor/ { next }
+-    /88x2bu|RTW|rtw_|kp-protect|kpp|bcmdhd|dhd|wl_|cfg80211|wlan0|usb [0-9]|usbcore|dwc_otg|hub|Oops|BUG|Unable to handle|[Pp]anic|lockup|[Ww]atchdog|PC is at|LR is at|Backtrace|Call trace|Kernel|CPU: [0-9]|Comm:|Internal error|Tainted|\[</ {
++    /88x2bu|8851bu|RTW|rtw_|kp-protect|kpp|bcmdhd|dhd|wl_|cfg80211|wlan0|usb [0-9]|usbcore|dwc_otg|hub|Oops|BUG|Unable to handle|[Pp]anic|lockup|[Ww]atchdog|PC is at|LR is at|Backtrace|Call trace|Kernel|CPU: [0-9]|Comm:|Internal error|Tainted|\[</ {
+       gsub(/[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]/, "xx:xx:xx:xx:xx:xx")
+       gsub(/[0-9A-Fa-f][0-9A-Fa-f][:-][0-9A-Fa-f][0-9A-Fa-f][:-][0-9A-Fa-f][0-9A-Fa-f][:-][*][*][:-][*][*][:-][*][*]/, "xx:xx:xx:**:**:**")
+       gsub(/id[VP][a-z]*=[0-9A-Fa-f]+/, "id=*")
+@@ -5584,7 +5747,7 @@
+   _dgbm=n; $BB grep -q "^$DG_BUILTIN_MOD " ${PROC:-/proc}/modules 2>/dev/null && _dgbm=y
+   _dgbd=n; dg_present && _dgbd=y
+   _dgbw=n; [ -e ${SYSNET:-/sys/class/net}/$DG_IFNAME ] && _dgbw=y
+-  _dgbl="#$_dgbn up=$_dgu $1 bcmdhd=$_dgbm 88x2bu=$_dgbd wlan0=$_dgbw prop=$(getprop $DG_KPROP 2>/dev/null)"
++  _dgbl="#$_dgbn up=$_dgu $1 bcmdhd=$_dgbm driver=$DG_MOD loaded=$_dgbd wlan0=$_dgbw prop=$(getprop $DG_KPROP 2>/dev/null)"
+   # 저장값·logcat은 올리기 직전(pre-ins, 부팅 약 60초 뒤)에만: settings는 한 번에 몇 초 걸리고, 서비스 시작·부팅 끝 직후에는
+   # 가드를 거는 일을 늦춘다. 그 때의 순정 HAL insmod 줄이 "wifi_on=0이면 bcmdhd가 안 올라오는지"의 근거다
+   if [ "$1" = pre-ins ]; then
+@@ -5702,6 +5865,7 @@
+   stop_ours; rm -f $DG_TRY; $BB sync; DG_ST=notours; dg_state notours "$DG_G"; dg_bst notours; log "동글: 꽂힌 동글이 지원 목록에 없어 우리 AP를 띄우지 않음"
+ }
+ dg_start() {
++  dg_driver_restore
+   dg_pull_endcheck; dg_step_endcheck; rm -f $W/hapd.up
+   dg_up_s; DG_BOOT0=$_dgu
+   DG_RUN=0; DG_ST=; DG_G=
+@@ -5768,6 +5932,19 @@
+   if dg_otherpkg; then dg_guard_release; DG_ST=otherpkg; dg_state otherpkg "$DG_OTHER"; log "동글: 다른 동글 패키지·드라이버($DG_OTHER)가 있어 쓰지 않음"; return 0; fi
+   # DG-3: 허용한 동글이 꽂혀 있을 때만 올린다(없으면 올리지 않음, 동글을 꽂고 재부팅)
+   dg_usb
++  if [ "$DG_USB" = cdrom ]; then
++    # 설치 USB가 있는 부팅과 USB ADB 모드에서는 전환하지 않는다.
++    _dgsk=; [ -f "$DG_SKIPF" ] && read -r _dgsk _dgskx < "$DG_SKIPF" 2>/dev/null
++    if [ -n "$BID" ] && [ "$_dgsk" != "$BID" ] && ! usb_adb_on; then
++      dg_cdrom_switch
++      dg_usb
++    fi
++    if [ "$DG_USB" = cdrom ]; then
++      DG_ST=nodongle; dg_state nodongle; dg_guard_release
++      log "동글: CD-ROM 모드에서 Wi-Fi USB ID를 확인하지 못해 드라이버를 올리지 않음"
++      return 0
++    fi
++  fi
+   # 시험판 5: 부팅 때 동글이 없어도 동글 길을 탄다(드라이버를 먼저 올리고 "지금 동글을 꽂으세요", 허용 확인은 꽂은 뒤 dg_ident_tick)
+   if [ $DG_USB = none ] && ! usb_adb_on && [ "$DG_NODEV_START" = 1 ]; then
+     rm -f $DG_OUIF; log "동글: 부팅 때 동글이 없음 — 드라이버를 올린 뒤 꽂으라고 안내함"
+@@ -5783,6 +5960,14 @@
+   # 이번 부팅에 붙은 뒤 다시 판단한다(dg_oui_gate). 동글을 쓰는 부팅은 내장 Wi-Fi 드라이버가 처음부터 없어 미리 막아도 얻는 것이 없다
+   if ! dg_pick; then dg_guard_release; DG_ST=$DG_WHY; dg_state $DG_WHY; log "동글 드라이버: 올리지 않음($DG_WHY)"; return 0; fi
+   _dgk=$DG_DRV/$DG_G/$DG_MOD.ko
++  if [ "$DG_MOD" = 8851bu ]; then
++    _dgk=$KP_AX_APP/bin/8851bu.ko
++    if ! dg_ax_payload 8851bu.ko; then
++      dg_guard_release; DG_ST=nodrv; dg_state nodrv "$DG_G"
++      log "AX900mini: 애드온 커널 모듈의 SHA-256 검증 실패"
++      return 0
++    fi
++  fi
+   [ -s $_dgk ] || { dg_guard_release; DG_ST=nodrv; dg_state nodrv "$DG_G"; log "동글 드라이버: 이 칩용 파일이 패키지에 없음($DG_G)"; return 0; }
+   [ -n "$BID" ] || { dg_guard_release; DG_ST=nowrite; dg_state nowrite "$DG_G"; log "동글 드라이버: 부팅 id를 못 읽어 올리지 않음"; return 0; }
+   # 시험판 4: 이 패키지를 설치·업데이트한 부팅에는 동글 길을 타지 않는다(설치 USB가 포트에 있고 곧 재부팅함. post.sh가 그때 boot_id를 남김)
+@@ -5867,18 +6052,28 @@
+   if ! dg_rm_now; then
+     rm -f $DG_RMF.tmp $DG_TRY; $BB sync; dg_guard_release; DG_ST=nowrite; dg_state nowrite "$DG_G"; log "동글 드라이버: 이 부팅 표시를 남기지 못해 올리지 않음"; return 0
+   fi
+-  _dgiu=0; dg_usb; [ $DG_USB = ok ] && { _dgiu=1; log "동글: insmod 때 동글이 이미 꽂혀 있음(안내 전에 꽂음)"; }
++  _dgiu=0; dg_usb; [ "$DG_USB" = ok ] && [ "$(dg_driver_for_id "$DG_USBID")" = "$DG_MOD" ] && { _dgiu=1; log "동글: insmod 때 동글이 이미 꽂혀 있음(안내 전에 꽂음)"; }
+   # 정식 F5: insmod 때 동글이 없었던 부팅을 적는다(dg_late_first). 있었으면 지운다
+   if [ $_dgiu = 1 ]; then rm -f $W/dg.late; else echo "${BID:-none}" 2>/dev/null > $W/dg.late; fi
+   [ "$DG_FASTWAY" = 1 ] || dg_boot0 pre-ins
+   dg_up_s; echo "${BID:-none} $_dgu" 2>/dev/null > $W/dgins.start
+   dg_tl ins $_dgu
+   if [ "$DG_FASTWAY" = 1 ]; then echo "${BID:-none}" 2>/dev/null > $BK/dongle.fastb; $BB sync; fi
+-  log "동글 드라이버를 올림($DG_G, 이름 $DG_IFNAME)"
++  if [ "$DG_MOD" = 8851bu ] && [ "$_dgiu" != 1 ]; then
++    rm -f "$DG_TRY"; dg_guard_release; DG_ST=nodongle; dg_state nodongle "$DG_G"
++    log "AX 동글이 insmod 전에 사라짐. 꽂은 채 재부팅하세요."
++    return 0
++  fi
++  if ! dg_driver_save; then
++    rm -f "$DG_TRY"; dg_guard_release; DG_ST=nowrite; dg_state nowrite "$DG_G"
++    log "동글 드라이버 선택 기록을 쓸 수 없어 멈춤"
++    return 0
++  fi
++  log "동글 드라이버를 올림($DG_G/$DG_MOD, USB ${DG_USBID:--}, 이름 $DG_IFNAME)"
+   dg_stage insmod; dg_step "ins-start dongle=$_dgiu"
+   # insmod는 뒤에서 돌린다(커널 안에서 멈추면 서비스까지 멈추지 않게). 결과 "<boot_id> <돌려준 값> <묶음>"은 tmp→mv로 쓴다
+   # 시험판 4: 8차(2h)와 같은 인자(두 번째 이름 kpp%d — 드라이버가 둘째 장치를 만들 때 wlan 이름과 겹치지 않게)
+-  ( "$INSMOD_SYS" "$_dgk" ifname=$DG_IFNAME if2name=kpp%d >/dev/null 2>&1; echo "$BID $? $DG_G" 2>/dev/null > $DG_RCF.tmp && $BB mv -f $DG_RCF.tmp $DG_RCF ) &
++  ( dg_insmod "$_dgk" >/dev/null 2>&1; echo "$BID $? $DG_G" 2>/dev/null > $DG_RCF.tmp && $BB mv -f $DG_RCF.tmp $DG_RCF ) &
+   # 끝나는 조건: 결과 파일 또는 DG_WAIT초(기본 10초)
+   _dgw=0
+   while [ ! -f $DG_RCF ] && [ $_dgw -lt ${DG_WAIT:-10} ]; do sleep 1 & wait $!; _dgw=$((_dgw + 1)); done
+@@ -6209,7 +6404,7 @@
+        for _dgli2 in $DG_USBDEV/*:*; do
+          [ -d "$_dgli2" ] || continue
+          us_drv $_dgli2/driver; [ -z "$_ud" ] || [ "$_ud" = "?" ] || continue
+-         { echo "${_dgli2##*/}" > $DG_88DRV/bind; } 2>/dev/null
++         { echo "${_dgli2##*/}" > "$(dg_driver_sysfs)/bind"; } 2>/dev/null
+        done ;;
+     4) dg_vbus_path >/dev/null || { _dglr=skip; return 0; }
+        # 리뷰 M2: vbus 파일은 dwc_otg 컨트롤러 포트 것이다. 동글이 그 컨트롤러 버스에 있을 때만(다른 포트 전원을 끄지 않게)
+@@ -6397,7 +6592,7 @@
+   for _dgi in $USB_SYS/*:*; do
+     [ -d "$_dgi" ] || continue
+     us_drv $_dgi/driver
+-    case "$_ud" in *88x2bu*) return 0 ;; esac
++    case "$DG_MOD:$_ud" in 88x2bu:*88x2bu*|8851bu:rtl8851bu) return 0 ;; esac
+   done
+   return 1
+ }
+@@ -6592,6 +6787,7 @@
+     # 리뷰 낮음 2: 멈춘 채로도 [제보 파일 만들기]는 받는다(idle_req: 30초마다 요청만 봄, 차를 바꾸는 일은 하지 않음)
+     idle_req
+   fi
++  log "비공식 RTL8831BU 애드온이 적용된 Korea Projection v1.8.0입니다."
+   # 1.7.4 베타 2(측정): 측정 기록에 서비스 시작 표시 줄
+   perf_start
+   # 1.7.2(P-8·P-11·P-17): 이번 부팅의 첫 시작인가. $W/svc.start "<부팅 id> <부팅 뒤 초>"(첫 시작 때만 씀, 리포트가 읽음).
+@@ -6601,6 +6797,13 @@
+   # 1.7.3(K-7): 부팅 id는 한 부팅 동안 바뀌지 않으므로 서비스 시작 때 한 번 읽어 BID에 둔다(30초 점검마다 cat을 띄우지 않게).
+   # BID가 비어 있으면(못 읽음, status.sh가 라이브러리로 쓸 때) 아래 함수들은 예전처럼 그때 읽는다
+   BID=$_sb
++  # Do not load a module on the boot that ran the add-on install transaction.
++  _ax_install_boot=
++  { read -r _ax_install_boot < /data/nemesis/backup/korea.projection.rtl8831bu/ready; } 2>/dev/null
++  if [ -n "$BID" ] && [ "$BID" = "$_ax_install_boot" ]; then
++    log "RTL8831BU 애드온 설치 완료. 동글을 연결하고 재부팅하세요."
++    idle_req
++  fi
+   [ -f $W/svc.start ] && read _so _sx < $W/svc.start
+   if [ -n "$_sb" ] && [ "$_so" = "$_sb" ]; then
+     SVC_FIRST=0; log "서비스 다시 시작(같은 부팅, 부팅 뒤 ${_su:-?}초)"

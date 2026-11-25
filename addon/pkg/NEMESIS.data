@@ -1,0 +1,18 @@
+[nemesis]
+version=1.1
+id=korea.projection.rtl8831bu
+name=Korea Projection RTL8831BU Add-on (Unofficial)
+type=application
+package-version=1.0.2
+depends="korea.projection@1.8.0"
+os="NX4HEV.KOR.0000.V039.001.260902,NX4HEV.KOR.S5W_M.V039.001.260902"
+models="*_kr"
+short-desc="Unofficial AX900mini add-on for official Korea Projection 1.8.0"
+preinstall=scripts/pre.sh
+postinstall=scripts/post.sh
+preuninstall=scripts/preun.sh
+
+[app.0]
+kind=sh
+path=bin/status.sh
+uid=root

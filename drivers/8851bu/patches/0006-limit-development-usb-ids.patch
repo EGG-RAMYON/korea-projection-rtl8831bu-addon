@@ -1,0 +1,30 @@
+Korea Projection: limit the development module to the two accepted Realtek IDs
+
+--- a/os_dep/linux/usb_intf.c
++++ b/os_dep/linux/usb_intf.c
+@@ -220,24 +220,9 @@
+ 	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDER_ID_REALTEK, 0xA85C, 0xff, 0xff, 0xff), .driver_info = RTL8852BP},
+ #endif /* CONFIG_RTL8852BP */
+ #ifdef CONFIG_RTL8851B
+-	/*=== Realtek demoboard ===*/
++	/* Korea Projection beta.3 development allowlist. */
+ 	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDER_ID_REALTEK, 0xB851, 0xff, 0xff, 0xff), .driver_info = RTL8851B},
+-
+-	/*=== TP Link TX10UB AX900 ===*/
+-	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDOR_ID_TPLINK, 0x010B, 0xff, 0xff, 0xff), .driver_info = RTL8851B},
+-
+-	/*=== EDIMAX EW-7611UXB ===*/
+-	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDER_ID_EDIMAX, 0xE611, 0xff, 0xff, 0xff), .driver_info = RTL8851B},
+-
+-	/*
+-	 * jmk-wifi: more RTL8851BU dongles, as Linux's own rtw89 rtw8851bu.c lists them
+-	 * (Linux 6.18-7.2). 0bda:b831 is also what five cars' dongle reports show
+-	 * (2026-11). 0bda:b832 is an RTL8852B and stays there.
+-	 */
+ 	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDER_ID_REALTEK, 0xB831, 0xff, 0xff, 0xff), .driver_info = RTL8851B},
+-	/*=== D-Link AX9U rev. A1 ===*/
+-	{USB_DEVICE_AND_INTERFACE_INFO(0x2001, 0x332A, 0xff, 0xff, 0xff), .driver_info = RTL8851B},
+-	{USB_DEVICE_AND_INTERFACE_INFO(0x2C4E, 0x0128, 0xff, 0xff, 0xff), .driver_info = RTL8851B},
+ #endif /* CONFIG_RTL8851B */
+ 
+ #ifdef CONFIG_RTL8852C
